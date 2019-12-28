@@ -1,9 +1,16 @@
 # Kubernetes
 
-[![GoDoc Widget]][GoDoc] [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/569/badge)](https://bestpractices.coreinfrastructure.org/projects/569)
+基于k8s v1.17.0-rc.1添加注释
 
-<img src="https://github.com/kubernetes/kubernetes/raw/master/logo/logo.png" width="100">
+进展:
 
+- [X] scheduler
+ 
+
+
+
+ 
+ 
 ----
 
 Kubernetes is an open source system for managing [containerized applications]
