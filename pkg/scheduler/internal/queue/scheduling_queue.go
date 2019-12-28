@@ -116,26 +116,27 @@ func NominatedNodeName(pod *v1.Pod) string {
 // pods that are already tried and are determined to be unschedulable. The latter
 // is called unschedulableQ. The third queue holds pods that are moved from
 // unschedulable queues and will be moved to active queue when backoff are completed.
+// 调度队列的实现
 type PriorityQueue struct {
 	stop  <-chan struct{}
 	clock util.Clock
 	// podBackoff tracks backoff for pods attempting to be rescheduled
-	podBackoff *PodBackoffMap
+	podBackoff *PodBackoffMap // 调度失败，需要重新调度的pod
 
 	lock sync.RWMutex
 	cond sync.Cond
 
 	// activeQ is heap structure that scheduler actively looks at to find pods to
 	// schedule. Head of heap is the highest priority pod.
-	activeQ *heap.Heap
+	activeQ *heap.Heap // 等待调度的优先级队列，实际上是一个优先级最大堆
 	// podBackoffQ is a heap ordered by backoff expiry. Pods which have completed backoff
 	// are popped from this heap before the scheduler looks at activeQ
-	podBackoffQ *heap.Heap
+	podBackoffQ *heap.Heap // 调度失败，需要重新调度的pod队列，是一个延时时间的最小堆
 	// unschedulableQ holds pods that have been tried and determined unschedulable.
-	unschedulableQ *UnschedulablePodsMap
+	unschedulableQ *UnschedulablePodsMap // 保存无法调度的pod
 	// nominatedPods is a structures that stores pods which are nominated to run
 	// on nodes.
-	nominatedPods *nominatedPodMap
+	nominatedPods *nominatedPodMap // 存储nominatedPods，一般是正在抢占的pod，这些pod已经分配了要调度的node，但是还不能马上调度过去
 	// schedulingCycle represents sequence number of scheduling cycle and is incremented
 	// when a pod is popped.
 	schedulingCycle int64

@@ -68,7 +68,7 @@ type Option func(framework.Registry) error
 
 // NewSchedulerCommand creates a *cobra.Command object with default parameters and registryOptions
 func NewSchedulerCommand(registryOptions ...Option) *cobra.Command {
-	opts, err := options.NewOptions()
+	opts, err := options.NewOptions() // 默认配置
 	if err != nil {
 		klog.Fatalf("unable to initialize command options: %v", err)
 	}
@@ -82,15 +82,20 @@ resource requirements, quality of service requirements, hardware/software/policy
 constraints, affinity and anti-affinity specifications, data locality, inter-workload
 interference, deadlines, and so on. Workload-specific requirements will be exposed
 through the API as necessary.`,
+		// 命令入口
 		Run: func(cmd *cobra.Command, args []string) {
+			// opts是配置
+			// args是none-flags参数
 			if err := runCommand(cmd, args, opts, registryOptions...); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
 		},
 	}
+
+	// flags的内容将会被写到配置中
 	fs := cmd.Flags()
-	namedFlagSets := opts.Flags()
+	namedFlagSets := opts.Flags() // 从配置中生成需要设置的flags
 	verflag.AddFlags(namedFlagSets.FlagSet("global"))
 	globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name())
 	for _, f := range namedFlagSets.FlagSets {
@@ -99,15 +104,19 @@ through the API as necessary.`,
 
 	usageFmt := "Usage:\n  %s\n"
 	cols, _, _ := term.TerminalSize(cmd.OutOrStdout())
+	// usage
 	cmd.SetUsageFunc(func(cmd *cobra.Command) error {
 		fmt.Fprintf(cmd.OutOrStderr(), usageFmt, cmd.UseLine())
 		cliflag.PrintSections(cmd.OutOrStderr(), namedFlagSets, cols)
 		return nil
 	})
+	// help
 	cmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(cmd.OutOrStdout(), "%s\n\n"+usageFmt, cmd.Long, cmd.UseLine())
 		cliflag.PrintSections(cmd.OutOrStdout(), namedFlagSets, cols)
 	})
+
+	// config配置文件的格式
 	cmd.MarkFlagFilename("config", "yaml", "yml", "json")
 
 	return cmd
@@ -122,10 +131,12 @@ func runCommand(cmd *cobra.Command, args []string, opts *options.Options, regist
 		fmt.Fprint(os.Stderr, "arguments are not supported\n")
 	}
 
+	// 校验配置
 	if errs := opts.Validate(); len(errs) > 0 {
 		return utilerrors.NewAggregate(errs)
 	}
 
+	// 如果设置了WriteConfigTo，则将配置保存到指定路径
 	if len(opts.WriteConfigTo) > 0 {
 		c := &schedulerserverconfig.Config{}
 		if err := opts.ApplyTo(c); err != nil {
@@ -138,6 +149,8 @@ func runCommand(cmd *cobra.Command, args []string, opts *options.Options, regist
 		return nil
 	}
 
+	// 从opts中生成schedulerappconfig
+	// 里面会创建kube client和informer等
 	c, err := opts.Config()
 	if err != nil {
 		return err
@@ -185,6 +198,7 @@ func Run(ctx context.Context, cc schedulerserverconfig.CompletedConfig, outOfTre
 	}
 
 	// Create the scheduler.
+	// 创建scheduler
 	sched, err := scheduler.New(cc.Client,
 		cc.InformerFactory,
 		cc.PodInformer,
@@ -243,13 +257,17 @@ func Run(ctx context.Context, cc schedulerserverconfig.CompletedConfig, outOfTre
 	}
 
 	// Start all informers.
+
+	// 开始Informer
 	go cc.PodInformer.Informer().Run(ctx.Done())
 	cc.InformerFactory.Start(ctx.Done())
 
 	// Wait for all caches to sync before scheduling.
+	// 等待缓存同步
 	cc.InformerFactory.WaitForCacheSync(ctx.Done())
 
 	// If leader election is enabled, runCommand via LeaderElector until done and exit.
+	// 如果开启了选主
 	if cc.LeaderElection != nil {
 		cc.LeaderElection.Callbacks = leaderelection.LeaderCallbacks{
 			OnStartedLeading: sched.Run,
@@ -268,6 +286,7 @@ func Run(ctx context.Context, cc schedulerserverconfig.CompletedConfig, outOfTre
 	}
 
 	// Leader election is disabled, so runCommand inline until done.
+	// 不需要选主
 	sched.Run(ctx)
 	return fmt.Errorf("finished without leader elect")
 }

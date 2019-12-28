@@ -152,6 +152,8 @@ var defaultFrameworkOptions = frameworkOptions{
 var _ Framework = &framework{}
 
 // NewFramework initializes plugins given the configuration and the registry.
+// plugins是要启用的插件
+// args是插件对应的配置参数
 func NewFramework(r Registry, plugins *config.Plugins, args []config.PluginConfig, opts ...Option) (Framework, error) {
 	options := defaultFrameworkOptions
 	for _, opt := range opts {
@@ -172,11 +174,13 @@ func NewFramework(r Registry, plugins *config.Plugins, args []config.PluginConfi
 	}
 
 	// get needed plugins from config
+	// 获取pluginMap
 	pg := f.pluginsNeeded(plugins)
 	if len(pg) == 0 {
 		return f, nil
 	}
 
+	// 插件的配置
 	pluginConfig := make(map[string]*runtime.Unknown, 0)
 	for i := range args {
 		pluginConfig[args[i].Name] = &args[i].Args
@@ -189,20 +193,24 @@ func NewFramework(r Registry, plugins *config.Plugins, args []config.PluginConfi
 			continue
 		}
 
+		// 调用对应的工厂方法，初始化plugin
+		// 不同扩展点具有不同类型的plugin接口，因此这里返回的是Plugin interface，是所有plugin的公共接口
 		p, err := factory(pluginConfig[name], f)
 		if err != nil {
 			return nil, fmt.Errorf("error initializing plugin %q: %v", name, err)
 		}
-		pluginsMap[name] = p
+		pluginsMap[name] = p // 加入到pluginsMap中
 
 		// a weight of zero is not permitted, plugins can be disabled explicitly
 		// when configured.
+		// 设置plugin的weight，最小是1
 		f.pluginNameToWeightMap[name] = int(pg[name].Weight)
 		if f.pluginNameToWeightMap[name] == 0 {
 			f.pluginNameToWeightMap[name] = 1
 		}
 	}
 
+	// 通过反射更新framework的各个xxxPlugins字段
 	for _, e := range f.getExtensionPoints(plugins) {
 		if err := updatePluginList(e.slicePtr, e.plugins, pluginsMap); err != nil {
 			return nil, err
@@ -211,6 +219,7 @@ func NewFramework(r Registry, plugins *config.Plugins, args []config.PluginConfi
 
 	// Verifying the score weights again since Plugin.Name() could return a different
 	// value from the one used in the configuration.
+	// 检查scorePlugin的权重，确保不等于0
 	for _, scorePlugin := range f.scorePlugins {
 		if f.pluginNameToWeightMap[scorePlugin.Name()] == 0 {
 			return nil, fmt.Errorf("score plugin %q is not configured with weight", scorePlugin.Name())
@@ -229,15 +238,19 @@ func updatePluginList(pluginList interface{}, pluginSet *config.PluginSet, plugi
 		return nil
 	}
 
+	// pluginList是指向framework中某个xxxPlugins字段的指针
 	plugins := reflect.ValueOf(pluginList).Elem()
+	// 切片元素的类型
 	pluginType := plugins.Type().Elem()
 	set := sets.NewString()
 	for _, ep := range pluginSet.Enabled {
+		// 通过plugin的名字获取对应的plugin实例
 		pg, ok := pluginsMap[ep.Name]
 		if !ok {
 			return fmt.Errorf("%s %q does not exist", pluginType.Name(), ep.Name)
 		}
 
+		// 根据反射动态检查是否实现了对应接口
 		if !reflect.TypeOf(pg).Implements(pluginType) {
 			return fmt.Errorf("plugin %q does not extend %s plugin", ep.Name, pluginType.Name())
 		}
@@ -247,7 +260,7 @@ func updatePluginList(pluginList interface{}, pluginSet *config.PluginSet, plugi
 		}
 
 		set.Insert(ep.Name)
-
+		// 将plugin加入到列表中
 		newPlugins := reflect.Append(plugins, reflect.ValueOf(pg))
 		plugins.Set(newPlugins)
 	}
@@ -485,6 +498,7 @@ func (f *framework) RunScorePlugins(ctx context.Context, state *CycleState, pod 
 	errCh := schedutil.NewErrorChannel()
 
 	// Run Score method for each node in parallel.
+	// 并行评分，相当于map
 	workqueue.ParallelizeUntil(ctx, 16, len(nodes), func(index int) {
 		for _, pl := range f.scorePlugins {
 			nodeName := nodes[index].Name
@@ -506,6 +520,7 @@ func (f *framework) RunScorePlugins(ctx context.Context, state *CycleState, pod 
 	}
 
 	// Run NormalizeScore method for each ScorePlugin in parallel.
+	// 并行对得分进行归一化，相当于reduce
 	workqueue.ParallelizeUntil(ctx, 16, len(f.scorePlugins), func(index int) {
 		pl := f.scorePlugins[index]
 		nodeScoreList := pluginToNodeScores[pl.Name()]
@@ -526,6 +541,7 @@ func (f *framework) RunScorePlugins(ctx context.Context, state *CycleState, pod 
 	}
 
 	// Apply score defaultWeights for each ScorePlugin in parallel.
+	// pluginScore为每个plugin的得分乘以其weight的和
 	workqueue.ParallelizeUntil(ctx, 16, len(f.scorePlugins), func(index int) {
 		pl := f.scorePlugins[index]
 		// Score plugins' weight has been checked when they are initialized.
@@ -539,6 +555,7 @@ func (f *framework) RunScorePlugins(ctx context.Context, state *CycleState, pod 
 				errCh.SendErrorWithCancel(err, cancel)
 				return
 			}
+			// score*weight
 			nodeScoreList[i].Score = nodeScore.Score * int64(weight)
 		}
 	})

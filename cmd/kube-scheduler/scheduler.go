@@ -30,9 +30,9 @@ import (
 )
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano()) // 初始化随机种子
 
-	command := app.NewSchedulerCommand()
+	command := app.NewSchedulerCommand() // 创建command
 
 	// TODO: once we switch everything over to Cobra commands, we can go back to calling
 	// utilflag.InitFlags() (by removing its pflag.Parse() call). For now, we have to set the
@@ -42,6 +42,7 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 
+	// 执行command
 	if err := command.Execute(); err != nil {
 		os.Exit(1)
 	}

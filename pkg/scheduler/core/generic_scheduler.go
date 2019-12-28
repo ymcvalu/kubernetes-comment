@@ -187,21 +187,25 @@ func (g *genericScheduler) Schedule(ctx context.Context, state *framework.CycleS
 	trace := utiltrace.New("Scheduling", utiltrace.Field{Key: "namespace", Value: pod.Namespace}, utiltrace.Field{Key: "name", Value: pod.Name})
 	defer trace.LogIfLong(100 * time.Millisecond)
 
+	// 检查是否可以进行调度，主要检查pvc
 	if err := podPassesBasicChecks(pod, g.pvcLister); err != nil {
 		return result, err
 	}
 	trace.Step("Basic checks done")
 
+	// 生成node信息的快照
 	if err := g.snapshot(); err != nil {
 		return result, err
 	}
 	trace.Step("Snapshoting scheduler cache and node infos done")
 
+	// 如果没有node可以进行调度
 	if len(g.nodeInfoSnapshot.NodeInfoList) == 0 {
 		return result, ErrNoNodesAvailable
 	}
 
 	// Run "prefilter" plugins.
+	// 运行prefilter插件
 	preFilterStatus := g.framework.RunPreFilterPlugins(ctx, state, pod)
 	if !preFilterStatus.IsSuccess() {
 		return result, preFilterStatus.AsError()
@@ -209,6 +213,7 @@ func (g *genericScheduler) Schedule(ctx context.Context, state *framework.CycleS
 	trace.Step("Running prefilter plugins done")
 
 	startPredicateEvalTime := time.Now()
+	// 预选，选择可以调度的node列表
 	filteredNodes, failedPredicateMap, filteredNodesStatuses, err := g.findNodesThatFit(ctx, state, pod)
 	if err != nil {
 		return result, err
@@ -216,11 +221,13 @@ func (g *genericScheduler) Schedule(ctx context.Context, state *framework.CycleS
 	trace.Step("Computing predicates done")
 
 	// Run "postfilter" plugins.
+	// 运行postFilter插件
 	postfilterStatus := g.framework.RunPostFilterPlugins(ctx, state, pod, filteredNodes, filteredNodesStatuses)
 	if !postfilterStatus.IsSuccess() {
 		return result, postfilterStatus.AsError()
 	}
 
+	// 没有合适的node
 	if len(filteredNodes) == 0 {
 		return result, &FitError{
 			Pod:                   pod,
@@ -237,6 +244,7 @@ func (g *genericScheduler) Schedule(ctx context.Context, state *framework.CycleS
 
 	startPriorityEvalTime := time.Now()
 	// When only one node after predicate, just use it.
+	// 如果只有一个合适的node，就只能使用这个node了
 	if len(filteredNodes) == 1 {
 		metrics.SchedulingAlgorithmPriorityEvaluationDuration.Observe(metrics.SinceInSeconds(startPriorityEvalTime))
 		metrics.DeprecatedSchedulingAlgorithmPriorityEvaluationDuration.Observe(metrics.SinceInMicroseconds(startPriorityEvalTime))
@@ -247,7 +255,9 @@ func (g *genericScheduler) Schedule(ctx context.Context, state *framework.CycleS
 		}, nil
 	}
 
+	// 获取metadata
 	metaPrioritiesInterface := g.priorityMetaProducer(pod, filteredNodes, g.nodeInfoSnapshot)
+	// 执行优选
 	priorityList, err := g.prioritizeNodes(ctx, state, pod, metaPrioritiesInterface, filteredNodes)
 	if err != nil {
 		return result, err
@@ -258,6 +268,8 @@ func (g *genericScheduler) Schedule(ctx context.Context, state *framework.CycleS
 	metrics.SchedulingLatency.WithLabelValues(metrics.PriorityEvaluation).Observe(metrics.SinceInSeconds(startPriorityEvalTime))
 	metrics.DeprecatedSchedulingLatency.WithLabelValues(metrics.PriorityEvaluation).Observe(metrics.SinceInSeconds(startPriorityEvalTime))
 
+	// 根据得分选择一个建议的node
+	// 如果得分相同，则随机选择一个
 	host, err := g.selectHost(priorityList)
 	trace.Step("Prioritizing done")
 
@@ -300,6 +312,7 @@ func (g *genericScheduler) selectHost(nodeScoreList framework.NodeScoreList) (st
 			cntOfMaxScore = 1
 		} else if ns.Score == maxScore {
 			cntOfMaxScore++
+			// 如果得分相同，则随机选择一个
 			if rand.Intn(cntOfMaxScore) == 0 {
 				// Replace the candidate with probability of 1/cntOfMaxScore
 				selected = ns.Name
@@ -324,17 +337,21 @@ func (g *genericScheduler) selectHost(nodeScoreList framework.NodeScoreList) (st
 func (g *genericScheduler) Preempt(ctx context.Context, state *framework.CycleState, pod *v1.Pod, scheduleErr error) (*v1.Node, []*v1.Pod, []*v1.Pod, error) {
 	// Scheduler may return various types of errors. Consider preemption only if
 	// the error is of type FitError.
+	// 如果err不是FitError，则不会执行抢占
 	fitError, ok := scheduleErr.(*FitError)
 	if !ok || fitError == nil {
 		return nil, nil, nil, nil
 	}
+	// 检查pod是否可以抢占
 	if !podEligibleToPreemptOthers(pod, g.nodeInfoSnapshot.NodeInfoMap, g.enableNonPreempting) {
 		klog.V(5).Infof("Pod %v/%v is not eligible for more preemption.", pod.Namespace, pod.Name)
 		return nil, nil, nil, nil
 	}
+	// 如果没有node可以抢占
 	if len(g.nodeInfoSnapshot.NodeInfoMap) == 0 {
 		return nil, nil, nil, ErrNoNodesAvailable
 	}
+	// 获取预选失败，但是可以通过抢占来满足条件的node列表
 	potentialNodes := nodesWherePreemptionMightHelp(g.nodeInfoSnapshot.NodeInfoMap, fitError)
 	if len(potentialNodes) == 0 {
 		klog.V(3).Infof("Preemption will not help schedule pod %v/%v on any node.", pod.Namespace, pod.Name)
@@ -351,6 +368,7 @@ func (g *genericScheduler) Preempt(ctx context.Context, state *framework.CycleSt
 			return nil, nil, nil, err
 		}
 	}
+	// 并行计算每个node需要驱逐的pod
 	nodeToVictims, err := g.selectNodesForPreemption(ctx, state, pod, potentialNodes, pdbs)
 	if err != nil {
 		return nil, nil, nil, err
@@ -359,11 +377,13 @@ func (g *genericScheduler) Preempt(ctx context.Context, state *framework.CycleSt
 	// We will only check nodeToVictims with extenders that support preemption.
 	// Extenders which do not support preemption may later prevent preemptor from being scheduled on the nominated
 	// node. In that case, scheduler will find a different host for the preemptor in subsequent scheduling cycles.
+	// 调用extenders的抢占接口
 	nodeToVictims, err = g.processPreemptionWithExtenders(pod, nodeToVictims)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
+	// 选择一个node进行抢占
 	candidateNode := pickOneNodeForPreemption(nodeToVictims)
 	if candidateNode == nil {
 		return nil, nil, nil, nil
@@ -373,6 +393,7 @@ func (g *genericScheduler) Preempt(ctx context.Context, state *framework.CycleSt
 	// this node. So, we should remove their nomination. Removing their
 	// nomination updates these pods and moves them to the active queue. It
 	// lets scheduler find another place for them.
+	// 更低优先级的nominatedPods可能不再适合在这个node上了
 	nominatedPods := g.getLowerPriorityNominatedPods(pod, candidateNode.Name)
 	if nodeInfo, ok := g.nodeInfoSnapshot.NodeInfoMap[candidateNode.Name]; ok {
 		return nodeInfo.Node(), nodeToVictims[candidateNode].Pods, nominatedPods, nil
@@ -476,9 +497,11 @@ func (g *genericScheduler) findNodesThatFit(ctx context.Context, state *framewor
 	filteredNodesStatuses := framework.NodeToStatusMap{}
 
 	if len(g.predicates) == 0 && !g.framework.HasFilterPlugins() {
+		// 如果没有预选算法
 		filtered = g.nodeInfoSnapshot.ListNodes()
 	} else {
 		allNodes := len(g.nodeInfoSnapshot.NodeInfoList)
+		// 预选阶段只要找到该数量的合适的node就可以了
 		numNodesToFind := g.numFeasibleNodesToFind(int32(allNodes))
 
 		// Create filtered list with enough space to avoid growing it
@@ -493,13 +516,17 @@ func (g *genericScheduler) findNodesThatFit(ctx context.Context, state *framewor
 		ctx, cancel := context.WithCancel(ctx)
 
 		// We can use the same metadata producer for all nodes.
+		// 获取pod的metadata
 		meta := g.predicateMetaProducer(pod, g.nodeInfoSnapshot)
 		state.Write(migration.PredicatesStateKey, &migration.PredicatesStateData{Reference: meta})
 
+		// checkNode用于检查node是否可以调度
 		checkNode := func(i int) {
 			// We check the nodes starting from where we left off in the previous scheduling cycle,
 			// this is to make sure all nodes have the same chance of being examined across pods.
+			// 获取当前正在检查的node信息
 			nodeInfo := g.nodeInfoSnapshot.NodeInfoList[(g.nextStartNodeIndex+i)%allNodes]
+			// 检查当前节点是否合适
 			fits, failedPredicates, status, err := g.podFitsOnNode(
 				ctx,
 				state,
@@ -512,12 +539,15 @@ func (g *genericScheduler) findNodesThatFit(ctx context.Context, state *framewor
 				errCh.SendErrorWithCancel(err, cancel)
 				return
 			}
+			// 如果当前node合适
 			if fits {
 				length := atomic.AddInt32(&filteredLen, 1)
 				if length > numNodesToFind {
+					// 已经达到配置的数量，停止搜索
 					cancel()
 					atomic.AddInt32(&filteredLen, -1)
 				} else {
+					// 加入到filtered列表中
 					filtered[length-1] = nodeInfo.Node()
 				}
 			} else {
@@ -534,8 +564,10 @@ func (g *genericScheduler) findNodesThatFit(ctx context.Context, state *framewor
 
 		// Stops searching for more nodes once the configured number of feasible nodes
 		// are found.
+		// 并发对node进行检查，只要合适的node达到配置的数量就停止搜索
 		workqueue.ParallelizeUntil(ctx, 16, allNodes, checkNode)
 		processedNodes := int(filteredLen) + len(filteredNodesStatuses) + len(failedPredicateMap)
+		// 设置下一次从哪个node开始检查
 		g.nextStartNodeIndex = (g.nextStartNodeIndex + processedNodes) % allNodes
 
 		filtered = filtered[:filteredLen]
@@ -544,11 +576,15 @@ func (g *genericScheduler) findNodesThatFit(ctx context.Context, state *framewor
 		}
 	}
 
+	// 执行扩展预选算法
+	// 通过extenders允许外部进程干预调度过程
 	if len(filtered) > 0 && len(g.extenders) != 0 {
 		for _, extender := range g.extenders {
+			// 是否对该pod感兴趣
 			if !extender.IsInterested(pod) {
 				continue
 			}
+			// 调用扩展预选算法，过滤filtered node列表
 			filteredList, failedMap, err := extender.Filter(pod, filtered, g.nodeInfoSnapshot.NodeInfoMap)
 			if err != nil {
 				if extender.IsIgnorable() {
@@ -585,6 +621,7 @@ func (g *genericScheduler) addNominatedPods(ctx context.Context, pod *v1.Pod, me
 		// This may happen only in tests.
 		return false, meta, state, nodeInfo, nil
 	}
+	// 获取已经分配到node但是还没有运行的pods，比如执行抢占
 	nominatedPods := g.schedulingQueue.NominatedPodsForNode(nodeInfo.Node().Name)
 	if len(nominatedPods) == 0 {
 		return false, meta, state, nodeInfo, nil
@@ -655,20 +692,27 @@ func (g *genericScheduler) podFitsOnNode(
 	// the nominated pods are treated as not running. We can't just assume the
 	// nominated pods are running because they are not running right now and in fact,
 	// they may end up getting scheduled to a different node.
+	// 如果node存在nominatedPods，则在第一轮会将这些nominatedPods中优先级不低于当前Pod的pods添加到node中，然后在进行预选，
+	// 然后第二轮的时候，执行没有将这些pods加入到node中的情况，因为pod亲和性的关系
 	for i := 0; i < 2; i++ {
 		metaToUse := meta
 		stateToUse := state
 		nodeInfoToUse := info
 		if i == 0 {
 			var err error
+			// 第一轮，将node中优先级不低于当前待调度pod的nominatedPods添加到nodeInfo中
+			// 如果podsAdded返回true，则表明有nominatedPods添加到node中了
 			podsAdded, metaToUse, stateToUse, nodeInfoToUse, err = g.addNominatedPods(ctx, pod, meta, state, info)
 			if err != nil {
 				return false, []predicates.PredicateFailureReason{}, nil, err
 			}
 		} else if !podsAdded || len(failedPredicates) != 0 || !status.IsSuccess() {
+			// 第一轮预选流程执行成功，并且第一轮调度中，添加了nominatedPods，那么会执行第二轮，不添加那些nominatedPods的情况
+			// 因为nominatedPods最终不一定会调度到该node上，由于pod亲和性，需要保证当这些pod没有实际调度过来时也满足
 			break
 		}
 
+		// 预选函数需要按照预定的顺序执行
 		for _, predicateKey := range predicates.Ordering() {
 			var (
 				fit     bool
@@ -676,6 +720,7 @@ func (g *genericScheduler) podFitsOnNode(
 				err     error
 			)
 
+			// 如果启用了对应的预选算法
 			if predicate, exist := g.predicates[predicateKey]; exist {
 				fit, reasons, err = predicate(pod, metaToUse, nodeInfoToUse)
 				if err != nil {
@@ -695,13 +740,14 @@ func (g *genericScheduler) podFitsOnNode(
 				}
 			}
 		}
-
+		// 执行filterPlugins
 		status = g.framework.RunFilterPlugins(ctx, stateToUse, pod, nodeInfoToUse)
 		if !status.IsSuccess() && !status.IsUnschedulable() {
 			return false, failedPredicates, status, status.AsError()
 		}
 	}
 
+	// 所有预选算法都执行成功，并且filterPlugins也成功
 	return len(failedPredicates) == 0 && status.IsSuccess(), failedPredicates, status, nil
 }
 
@@ -711,6 +757,8 @@ func (g *genericScheduler) podFitsOnNode(
 // Each priority function can also have its own weight
 // The node scores returned by the priority function are multiplied by the weights to get weighted scores
 // All scores are finally combined (added) to get the total weighted scores of all nodes
+// 每个优选算法有自己的权重，优选算法最终的得分为：返回的得分*权重
+// node的得分为所有优选算法的得分之和
 func (g *genericScheduler) prioritizeNodes(
 	ctx context.Context,
 	state *framework.CycleState,
@@ -720,6 +768,7 @@ func (g *genericScheduler) prioritizeNodes(
 ) (framework.NodeScoreList, error) {
 	// If no priority configs are provided, then all nodes will have a score of one.
 	// This is required to generate the priority list in the required format
+	// 没有配置优选算法
 	if len(g.prioritizers) == 0 && len(g.extenders) == 0 && !g.framework.HasScorePlugins() {
 		result := make(framework.NodeScoreList, 0, len(nodes))
 		for i := range nodes {
@@ -748,10 +797,13 @@ func (g *genericScheduler) prioritizeNodes(
 		results[i] = make(framework.NodeScoreList, len(nodes))
 	}
 
+	// 并行对每个node分别计算得分
 	workqueue.ParallelizeUntil(context.TODO(), 16, len(nodes), func(index int) {
 		nodeInfo := g.nodeInfoSnapshot.NodeInfoMap[nodes[index].Name]
 		for i := range g.prioritizers {
 			var err error
+			// prioritizers分为map和reduce，一般map用于评分，reduce用于归一化得分
+			// 执行map函数获取对应的得分
 			results[i][index], err = g.prioritizers[i].Map(pod, meta, nodeInfo)
 			if err != nil {
 				appendError(err)
@@ -771,6 +823,7 @@ func (g *genericScheduler) prioritizeNodes(
 				metrics.SchedulerGoroutines.WithLabelValues("prioritizing_mapreduce").Dec()
 				wg.Done()
 			}()
+			// 执行reduce
 			if err := g.prioritizers[index].Reduce(pod, meta, g.nodeInfoSnapshot, results[index]); err != nil {
 				appendError(err)
 			}
@@ -788,29 +841,36 @@ func (g *genericScheduler) prioritizeNodes(
 	}
 
 	// Run the Score plugins.
+	// 运行framework的评分插件
 	state.Write(migration.PrioritiesStateKey, &migration.PrioritiesStateData{Reference: meta})
+	// 运行scorePlugins
 	scoresMap, scoreStatus := g.framework.RunScorePlugins(ctx, state, pod, nodes)
 	if !scoreStatus.IsSuccess() {
 		return framework.NodeScoreList{}, scoreStatus.AsError()
 	}
 
 	// Summarize all scores.
+	// 合并分数
 	result := make(framework.NodeScoreList, 0, len(nodes))
 
 	for i := range nodes {
 		result = append(result, framework.NodeScore{Name: nodes[i].Name, Score: 0})
 		for j := range g.prioritizers {
+			// 得分*权重
 			result[i].Score += results[j][i].Score * g.prioritizers[j].Weight
 		}
 
 		for j := range scoresMap {
+			// 加上scorePlugin的得分
 			result[i].Score += scoresMap[j][i].Score
 		}
 	}
 
+	// 存在extenders
 	if len(g.extenders) != 0 && nodes != nil {
 		combinedScores := make(map[string]int64, len(g.nodeInfoSnapshot.NodeInfoList))
 		for i := range g.extenders {
+			// 如果对这个pod感兴趣
 			if !g.extenders[i].IsInterested(pod) {
 				continue
 			}
@@ -821,6 +881,7 @@ func (g *genericScheduler) prioritizeNodes(
 					metrics.SchedulerGoroutines.WithLabelValues("prioritizing_extender").Dec()
 					wg.Done()
 				}()
+				// 调用extender的评分接口
 				prioritizedList, weight, err := g.extenders[extIndex].Prioritize(pod, nodes)
 				if err != nil {
 					// Prioritization errors from extender can be ignored, let k8s/other extenders determine the priorities
@@ -832,6 +893,7 @@ func (g *genericScheduler) prioritizeNodes(
 					if klog.V(10) {
 						klog.Infof("%v -> %v: %v, Score: (%d)", util.GetPodFullName(pod), host, g.extenders[extIndex].Name(), score)
 					}
+					// extender的得分为score*weight
 					combinedScores[host] += score * weight
 				}
 				mu.Unlock()
@@ -839,6 +901,7 @@ func (g *genericScheduler) prioritizeNodes(
 		}
 		// wait for all go routines to finish
 		wg.Wait()
+		// 更新最终得分
 		for i := range result {
 			// MaxExtenderPriority may diverge from the max priority used in the scheduler and defined by MaxNodeScore,
 			// therefore we need to scale the score returned by extenders to the score range used by the scheduler.
@@ -1218,17 +1281,21 @@ func nodesWherePreemptionMightHelp(nodeNameToInfo map[string]*schedulernodeinfo.
 // We look at the node that is nominated for this pod and as long as there are
 // terminating pods on the node, we don't consider this for preempting more pods.
 func podEligibleToPreemptOthers(pod *v1.Pod, nodeNameToInfo map[string]*schedulernodeinfo.NodeInfo, enableNonPreempting bool) bool {
+	// 在创建Pod的时候，可以设置抢占策略，如果设置为Never，则不会执行抢占
 	if enableNonPreempting && pod.Spec.PreemptionPolicy != nil && *pod.Spec.PreemptionPolicy == v1.PreemptNever {
 		klog.V(5).Infof("Pod %v/%v is not eligible for preemption because it has a preemptionPolicy of %v", pod.Namespace, pod.Name, v1.PreemptNever)
 		return false
 	}
 	nomNodeName := pod.Status.NominatedNodeName
+	// 如果已经指定抢占了其他pod
 	if len(nomNodeName) > 0 {
+		// 如果该node存在
 		if nodeInfo, found := nodeNameToInfo[nomNodeName]; found {
 			podPriority := podutil.GetPodPriority(pod)
 			for _, p := range nodeInfo.Pods() {
 				if p.DeletionTimestamp != nil && podutil.GetPodPriority(p) < podPriority {
 					// There is a terminating pod on the nominated node.
+					// 如果node中存在这在优雅退出的更低优先级的pod，不应该考虑执行抢占
 					return false
 				}
 			}

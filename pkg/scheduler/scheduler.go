@@ -247,15 +247,18 @@ func WithPodMaxBackoffSeconds(podMaxBackoffSeconds int64) Option {
 
 var defaultSchedulerOptions = schedulerOptions{
 	schedulerName: v1.DefaultSchedulerName,
+	// 设置默认的SchedulerAlgorithmSource
 	schedulerAlgorithmSource: schedulerapi.SchedulerAlgorithmSource{
+		// 默认Provider
 		Provider: defaultAlgorithmSourceProviderName(),
 	},
-	hardPodAffinitySymmetricWeight:  v1.DefaultHardPodAffinitySymmetricWeight,
-	disablePreemption:               false,
-	percentageOfNodesToScore:        schedulerapi.DefaultPercentageOfNodesToScore,
-	bindTimeoutSeconds:              BindTimeoutSeconds,
-	podInitialBackoffSeconds:        int64(internalqueue.DefaultPodInitialBackoffDuration.Seconds()),
-	podMaxBackoffSeconds:            int64(internalqueue.DefaultPodMaxBackoffDuration.Seconds()),
+	hardPodAffinitySymmetricWeight: v1.DefaultHardPodAffinitySymmetricWeight,
+	disablePreemption:              false,
+	percentageOfNodesToScore:       schedulerapi.DefaultPercentageOfNodesToScore,
+	bindTimeoutSeconds:             BindTimeoutSeconds,
+	podInitialBackoffSeconds:       int64(internalqueue.DefaultPodInitialBackoffDuration.Seconds()),
+	podMaxBackoffSeconds:           int64(internalqueue.DefaultPodMaxBackoffDuration.Seconds()),
+	// 默认configProducerRegistry
 	frameworkConfigProducerRegistry: frameworkplugins.NewDefaultConfigProducerRegistry(),
 	// The plugins and pluginConfig options are currently nil because we currently don't have
 	// "default" plugins. All plugins that we run through the framework currently come from two
@@ -297,8 +300,10 @@ func New(client clientset.Interface,
 		time.Duration(options.bindTimeoutSeconds)*time.Second,
 	)
 
+	// 创建plugin的工厂方法集合
 	registry := options.frameworkDefaultRegistry
 	if registry == nil {
+		// 如果没有指定registry，则使用默认的registry
 		registry = frameworkplugins.NewDefaultRegistry(&frameworkplugins.RegistryArgs{
 			VolumeBinder: volumeBinder,
 		})
@@ -337,6 +342,7 @@ func New(client clientset.Interface,
 
 	var sched *Scheduler
 	source := options.schedulerAlgorithmSource
+	// 创建Scheduler
 	switch {
 	case source.Provider != nil:
 		// Create the config from a named algorithm provider.
@@ -358,6 +364,7 @@ func New(client clientset.Interface,
 				return nil, err
 			}
 		}
+		// 根据用户指定的策略创建
 		sc, err := configurator.CreateFromConfig(*policy)
 		if err != nil {
 			return nil, fmt.Errorf("couldn't create scheduler from policy: %v", err)
@@ -375,6 +382,7 @@ func New(client clientset.Interface,
 	sched.podPreemptor = &podPreemptorImpl{client}
 	sched.scheduledPodsHasSynced = podInformer.Informer().HasSynced
 
+	// 注册事件handler
 	AddAllEventHandlers(sched, options.schedulerName, informerFactory, podInformer)
 	return sched, nil
 }
@@ -417,6 +425,7 @@ func initPolicyFromConfigMap(client clientset.Interface, policyRef *schedulerapi
 
 // Run begins watching and scheduling. It waits for cache to be synced, then starts scheduling and blocked until the context is done.
 func (sched *Scheduler) Run(ctx context.Context) {
+	// 等待缓存同步
 	if !cache.WaitForCacheSync(ctx.Done(), sched.scheduledPodsHasSynced) {
 		return
 	}
@@ -451,6 +460,7 @@ func (sched *Scheduler) preempt(ctx context.Context, state *framework.CycleState
 		return "", err
 	}
 
+	// 执行抢占策略，选择要抢占的node，要驱逐的pod列表，可能还会移除原来正在抢占中的pod
 	node, victims, nominatedPodsToClear, err := sched.Algorithm.Preempt(ctx, state, preemptor, scheduleErr)
 	if err != nil {
 		klog.Errorf("Error preempting victims to make room for %v/%v: %v", preemptor.Namespace, preemptor.Name, err)
@@ -465,6 +475,7 @@ func (sched *Scheduler) preempt(ctx context.Context, state *framework.CycleState
 		sched.SchedulingQueue.UpdateNominatedPodForNode(preemptor, nodeName)
 
 		// Make a call to update nominated node name of the pod on the API server.
+		// 通知api-server，设置pod的nominatedNodeName
 		err = sched.podPreemptor.setNominatedNodeName(preemptor, nodeName)
 		if err != nil {
 			klog.Errorf("Error in preemption process. Cannot set 'NominatedPod' on pod %v/%v: %v", preemptor.Namespace, preemptor.Name, err)
@@ -472,7 +483,9 @@ func (sched *Scheduler) preempt(ctx context.Context, state *framework.CycleState
 			return "", err
 		}
 
+		//
 		for _, victim := range victims {
+			// 调用api-server接口，删除要驱逐的pod
 			if err := sched.podPreemptor.deletePod(victim); err != nil {
 				klog.Errorf("Error preempting pod %v/%v: %v", victim.Namespace, victim.Name, err)
 				return "", err
@@ -491,7 +504,9 @@ func (sched *Scheduler) preempt(ctx context.Context, state *framework.CycleState
 	// but preemption logic does not find any node for it. In that case Preempt()
 	// function of generic_scheduler.go returns the pod itself for removal of
 	// the 'NominatedPod' field.
+	// 清除原来属于该node的需要移除的nominatedPods
 	for _, p := range nominatedPodsToClear {
+		// 会调用api-server的接口，更新其状态
 		rErr := sched.podPreemptor.removeNominatedNodeName(p)
 		if rErr != nil {
 			klog.Errorf("Cannot remove 'NominatedPod' field of pod: %v", rErr)
@@ -549,6 +564,7 @@ func (sched *Scheduler) assume(assumed *v1.Pod, host string) error {
 // handle binding metrics internally.
 func (sched *Scheduler) bind(ctx context.Context, assumed *v1.Pod, targetNode string, state *framework.CycleState) error {
 	bindingStart := time.Now()
+	// 运行bind插件来完成绑定操作
 	bindStatus := sched.Framework.RunBindPlugins(ctx, state, assumed, targetNode)
 	var err error
 	if !bindStatus.IsSuccess() {
@@ -556,6 +572,7 @@ func (sched *Scheduler) bind(ctx context.Context, assumed *v1.Pod, targetNode st
 			// All bind plugins chose to skip binding of this pod, call original binding function.
 			// If binding succeeds then PodScheduled condition will be updated in apiserver so that
 			// it's atomic with setting host.
+			// 如果所有的bind插件都skip，则使用原始的binding方法
 			err = sched.GetBinder(assumed).Bind(&v1.Binding{
 				ObjectMeta: metav1.ObjectMeta{Namespace: assumed.Namespace, Name: assumed.Name, UID: assumed.UID},
 				Target: v1.ObjectReference{
@@ -567,9 +584,12 @@ func (sched *Scheduler) bind(ctx context.Context, assumed *v1.Pod, targetNode st
 			err = fmt.Errorf("Bind failure, code: %d: %v", bindStatus.Code(), bindStatus.Message())
 		}
 	}
+
+	// FinishBinding signals that cache for assumed pod can be expired
 	if finErr := sched.SchedulerCache.FinishBinding(assumed); finErr != nil {
 		klog.Errorf("scheduler cache FinishBinding failed: %v", finErr)
 	}
+	// 绑定失败
 	if err != nil {
 		klog.V(1).Infof("Failed to bind pod: %v/%v", assumed.Namespace, assumed.Name)
 		if err := sched.SchedulerCache.ForgetPod(assumed); err != nil {
@@ -589,13 +609,14 @@ func (sched *Scheduler) bind(ctx context.Context, assumed *v1.Pod, targetNode st
 // scheduleOne does the entire scheduling workflow for a single pod.  It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	fwk := sched.Framework
-
+	// 获取下一个要调度的pod
 	podInfo := sched.NextPod()
 	// pod could be nil when schedulerQueue is closed
 	if podInfo == nil || podInfo.Pod == nil {
 		return
 	}
 	pod := podInfo.Pod
+	// pod已经删除了
 	if pod.DeletionTimestamp != nil {
 		sched.Recorder.Eventf(pod, nil, v1.EventTypeWarning, "FailedScheduling", "Scheduling", "skip schedule deleting pod: %v/%v", pod.Namespace, pod.Name)
 		klog.V(3).Infof("Skip schedule deleting pod: %v/%v", pod.Namespace, pod.Name)
@@ -607,9 +628,12 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	// Synchronously attempt to find a fit for the pod.
 	start := time.Now()
 	state := framework.NewCycleState()
+	// 设置是否收集metrics
 	state.SetRecordFrameworkMetrics(rand.Intn(100) < frameworkMetricsSamplePercent)
 	schedulingCycleCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// 执行预选和优选策略，选择要调度的node
 	scheduleResult, err := sched.Algorithm.Schedule(schedulingCycleCtx, state, pod)
 	if err != nil {
 		sched.recordSchedulingFailure(podInfo.DeepCopy(), err, v1.PodReasonUnschedulable, err.Error())
@@ -617,12 +641,15 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		// preempt, with the expectation that the next time the pod is tried for scheduling it
 		// will fit due to the preemption. It is also possible that a different pod will schedule
 		// into the resources that were preempted, but this is harmless.
+		// 如果由于没有合适的node而导致调度失败
 		if fitError, ok := err.(*core.FitError); ok {
 			if sched.DisablePreemption {
 				klog.V(3).Infof("Pod priority feature is not enabled or preemption is disabled by scheduler configuration." +
 					" No preemption is performed.")
 			} else {
+				// 如果允许抢占
 				preemptionStartTime := time.Now()
+				// 执行抢占
 				sched.preempt(schedulingCycleCtx, state, fwk, pod, fitError)
 				metrics.PreemptionAttempts.Inc()
 				metrics.SchedulingAlgorithmPreemptionEvaluationDuration.Observe(metrics.SinceInSeconds(preemptionStartTime))
@@ -654,6 +681,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	// Otherwise, binding of volumes is started after the pod is assumed, but before pod binding.
 	//
 	// This function modifies 'assumedPod' if volume binding is required.
+	//
 	allBound, err := sched.VolumeBinder.Binder.AssumePodVolumes(assumedPod, scheduleResult.SuggestedHost)
 	if err != nil {
 		sched.recordSchedulingFailure(assumedPodInfo, err, SchedulerError,
@@ -670,6 +698,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 	}
 
 	// assume modifies `assumedPod` by setting NodeName=scheduleResult.SuggestedHost
+	// 分配pod到node上，这里只是更新本地的cache
 	err = sched.assume(assumedPod, scheduleResult.SuggestedHost)
 	if err != nil {
 		// This is most probably result of a BUG in retrying logic.
@@ -691,6 +720,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		defer metrics.SchedulerGoroutines.WithLabelValues("binding").Dec()
 
 		// Run "permit" plugins.
+		// 运行permit插件
 		permitStatus := fwk.RunPermitPlugins(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
 		if !permitStatus.IsSuccess() {
 			var reason string
@@ -712,6 +742,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 
 		// Bind volumes first before Pod
 		if !allBound {
+			// 绑定volumes
 			err := sched.bindVolumes(assumedPod)
 			if err != nil {
 				sched.recordSchedulingFailure(assumedPodInfo, err, "VolumeBindingFailed", err.Error())
@@ -723,6 +754,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 		}
 
 		// Run "prebind" plugins.
+		// 运行prebind插件
 		preBindStatus := fwk.RunPreBindPlugins(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
 		if !preBindStatus.IsSuccess() {
 			var reason string
@@ -737,6 +769,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 			return
 		}
 
+		// 执行bind操作，通知api-server调度该pod到指定的node
 		err := sched.bind(bindingCycleCtx, assumedPod, scheduleResult.SuggestedHost, state)
 		metrics.E2eSchedulingLatency.Observe(metrics.SinceInSeconds(start))
 		metrics.DeprecatedE2eSchedulingLatency.Observe(metrics.SinceInMicroseconds(start))
@@ -756,6 +789,7 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 			metrics.PodSchedulingDuration.Observe(metrics.SinceInSeconds(podInfo.InitialAttemptTimestamp))
 
 			// Run "postbind" plugins.
+			// 运行postbind插件
 			fwk.RunPostBindPlugins(bindingCycleCtx, state, assumedPod, scheduleResult.SuggestedHost)
 		}
 	}()

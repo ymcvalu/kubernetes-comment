@@ -125,6 +125,7 @@ func (c *Configurator) Create() (*Scheduler, error) {
 // CreateFromProvider creates a scheduler from the name of a registered algorithm provider.
 func (c *Configurator) CreateFromProvider(providerName string) (*Scheduler, error) {
 	klog.V(2).Infof("Creating scheduler from algorithm provider '%v'", providerName)
+	// algorithmProvider，指定了需要使用的预选算法和优选算法
 	provider, err := GetAlgorithmProvider(providerName)
 	if err != nil {
 		return nil, err
@@ -175,6 +176,7 @@ func (c *Configurator) CreateFromConfig(policy schedulerapi.Policy) (*Scheduler,
 		}
 	}
 
+	// extenders：允许外部进程干预调度过程
 	var extenders []algorithm.SchedulerExtender
 	if len(policy.Extenders) != 0 {
 		ignoredExtendedResources := sets.NewString()
@@ -222,21 +224,27 @@ func (c *Configurator) CreateFromKeys(predicateKeys, priorityKeys sets.String, e
 		return nil, fmt.Errorf("invalid hardPodAffinitySymmetricWeight: %d, must be in the range 1-100", c.GetHardPodAffinitySymmetricWeight())
 	}
 
+	// 获取要使用的预选算法
+	// predicateFuncs作为fitPredicates，而pluginsForPredicates作为framework的plugins
 	predicateFuncs, pluginsForPredicates, pluginConfigForPredicates, err := c.getPredicateConfigs(predicateKeys)
 	if err != nil {
 		return nil, err
 	}
 
+	// 获取要使用的优选算法
+	// priorityConfigs作为priorities，而pluginsForPriorities作为framework的plugins
 	priorityConfigs, pluginsForPriorities, pluginConfigForPriorities, err := c.getPriorityConfigs(priorityKeys)
 	if err != nil {
 		return nil, err
 	}
 
+	// 用于在priority流程中获取pod的metadata
 	priorityMetaProducer, err := getPriorityMetadataProducer(c.algorithmFactoryArgs)
 	if err != nil {
 		return nil, err
 	}
 
+	// 用于在predicate流程中获取pod的metadata
 	predicateMetaProducer, err := getPredicateMetadataProducer(c.algorithmFactoryArgs)
 	if err != nil {
 		return nil, err
@@ -253,10 +261,11 @@ func (c *Configurator) CreateFromKeys(predicateKeys, priorityKeys sets.String, e
 	pluginConfig = append(pluginConfig, pluginConfigForPriorities...)
 	pluginConfig = append(pluginConfig, c.pluginConfig...)
 
+	// 创建framework
 	framework, err := framework.NewFramework(
-		c.registry,
-		&plugins,
-		pluginConfig,
+		c.registry,   // 用于创建plugin的工厂
+		&plugins,     // 启用的plugins
+		pluginConfig, // pluginConfig
 		framework.WithClientSet(c.client),
 		framework.WithInformerFactory(c.informerFactory),
 		framework.WithSnapshotSharedLister(c.nodeInfoSnapshot),
@@ -265,6 +274,8 @@ func (c *Configurator) CreateFromKeys(predicateKeys, priorityKeys sets.String, e
 		klog.Fatalf("error initializing the scheduling framework: %v", err)
 	}
 
+	// 创建调度队列
+	// 调度队列是一个优先级队列
 	podQueue := internalqueue.NewSchedulingQueue(
 		c.StopEverything,
 		framework,
@@ -286,25 +297,27 @@ func (c *Configurator) CreateFromKeys(predicateKeys, priorityKeys sets.String, e
 		podQueue.Close()
 	}()
 
+	// 创建通用调度器
 	algo := core.NewGenericScheduler(
-		c.schedulerCache,
-		podQueue,
-		predicateFuncs,
+		c.schedulerCache, // 本地缓存，主要存储node与分配到其上的pod的信息，调度时提供node的快照信息
+		podQueue,         // 调度队列
+		predicateFuncs,   // 预选算法
 		predicateMetaProducer,
-		priorityConfigs,
+		priorityConfigs, // 优选算法，优选算法是一个map-reduce过程，map主要功能是对node评分，reduce主要负责对分数进行归一化
 		priorityMetaProducer,
 		c.nodeInfoSnapshot,
-		framework,
-		extenders,
+		framework, // framework提供了plugin，会在调度流程的多个地方调用对应的plugin
+		extenders, // 用于提供扩展的调度算法，允许外部进程干预调度过程，在预选和优选过程会调用对应的接口
 		c.volumeBinder,
 		c.informerFactory.Core().V1().PersistentVolumeClaims().Lister(),
 		GetPodDisruptionBudgetLister(c.informerFactory),
 		c.alwaysCheckAllPredicates,
-		c.disablePreemption,
+		c.disablePreemption, // 是否禁止抢占调度
 		c.percentageOfNodesToScore,
 		c.enableNonPreempting,
 	)
 
+	// 创建Scheduler
 	return &Scheduler{
 		SchedulerCache:  c.schedulerCache,
 		Algorithm:       algo,
@@ -370,6 +383,7 @@ func (c *Configurator) getPriorityConfigs(priorityKeys sets.String) ([]prioritie
 // Note that the framework executes plugins according to their order in the Plugins list, and so predicates run as plugins
 // are added to the Plugins list according to the order specified in predicates.Ordering().
 func (c *Configurator) getPredicateConfigs(predicateKeys sets.String) (map[string]predicates.FitPredicate, *schedulerapi.Plugins, []schedulerapi.PluginConfig, error) {
+	// 通过keys获取对应的predicates
 	allFitPredicates, err := getFitPredicateFunctions(predicateKeys, c.algorithmFactoryArgs)
 	if err != nil {
 		return nil, nil, nil, err
@@ -385,6 +399,7 @@ func (c *Configurator) getPredicateConfigs(predicateKeys sets.String) (map[strin
 
 	// First, identify the predicates that will run as actual fit predicates, and ones
 	// that will run as framework plugins.
+	// predicates中有部分会作为framework的plugins运行
 	for predicateKey := range allFitPredicates {
 		if _, exist := frameworkConfigProducers[predicateKey]; exist {
 			asPlugins.Insert(predicateKey)

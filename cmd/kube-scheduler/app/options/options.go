@@ -251,6 +251,7 @@ func (o *Options) Config() (*schedulerappconfig.Config, error) {
 	}
 
 	c.Client = client
+	// 创建Informer
 	c.InformerFactory = informers.NewSharedInformerFactory(client, 0)
 	c.PodInformer = scheduler.NewPodInformer(client, 0)
 	c.EventClient = eventClient.EventsV1beta1()

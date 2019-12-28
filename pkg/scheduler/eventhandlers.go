@@ -339,7 +339,9 @@ func AddAllEventHandlers(
 	podInformer coreinformers.PodInformer,
 ) {
 	// scheduled pod cache
+	// 处理已经调度过的pod
 	podInformer.Informer().AddEventHandler(
+		// 过滤函数
 		cache.FilteringResourceEventHandler{
 			FilterFunc: func(obj interface{}) bool {
 				switch t := obj.(type) {
@@ -364,6 +366,7 @@ func AddAllEventHandlers(
 		},
 	)
 	// unscheduled pod queue
+	// 未调度的Pod
 	podInformer.Informer().AddEventHandler(
 		cache.FilteringResourceEventHandler{
 			FilterFunc: func(obj interface{}) bool {
@@ -389,6 +392,8 @@ func AddAllEventHandlers(
 		},
 	)
 
+	// 当有node、pv、pvc、storageClass等变更时，有些本来无法调度的pod可能现在可以进行调度了，
+	// 需要将当前不可调度pod转变为可调度状态
 	informerFactory.Core().V1().Nodes().Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    sched.addNodeToCache,
