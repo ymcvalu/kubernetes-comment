@@ -46,10 +46,13 @@ func (dc *DeploymentController) syncStatusOnly(d *apps.Deployment, rsList []*app
 // sync is responsible for reconciling deployments on scaling events or when they
 // are paused.
 func (dc *DeploymentController) sync(d *apps.Deployment, rsList []*apps.ReplicaSet) error {
+	// 获取新的RS以及历史RSs
 	newRS, oldRSs, err := dc.getAllReplicaSetsAndSyncRevision(d, rsList, false)
 	if err != nil {
 		return err
 	}
+
+	//
 	if err := dc.scale(d, newRS, oldRSs); err != nil {
 		// If we get an error while trying to scale, the deployment will be requeued
 		// so we can abort this resync
@@ -71,22 +74,30 @@ func (dc *DeploymentController) sync(d *apps.Deployment, rsList []*apps.ReplicaS
 // These conditions are needed so that we won't accidentally report lack of progress for resumed deployments
 // that were paused for longer than progressDeadlineSeconds.
 func (dc *DeploymentController) checkPausedConditions(d *apps.Deployment) error {
+	// 如果deployment没有设置progressDeadlineSeconds
 	if !deploymentutil.HasProgressDeadline(d) {
 		return nil
 	}
+
+	// 获取Progressing类型的condition
 	cond := deploymentutil.GetDeploymentCondition(d.Status, apps.DeploymentProgressing)
 	if cond != nil && cond.Reason == deploymentutil.TimedOutReason {
 		// If we have reported lack of progress, do not overwrite it with a paused condition.
 		return nil
 	}
+
+	// 是否当前处于暂停状态
 	pausedCondExists := cond != nil && cond.Reason == deploymentutil.PausedDeployReason
 
 	needsUpdate := false
+
 	if d.Spec.Paused && !pausedCondExists {
+		// 如果设置了Paused并且当前还没有处于暂停状态，需要更新status为暂停状态
 		condition := deploymentutil.NewDeploymentCondition(apps.DeploymentProgressing, v1.ConditionUnknown, deploymentutil.PausedDeployReason, "Deployment is paused")
 		deploymentutil.SetDeploymentCondition(&d.Status, *condition)
 		needsUpdate = true
 	} else if !d.Spec.Paused && pausedCondExists {
+		// 当前处于暂停状态，但是没有设置Paused，需要更新status为恢复调度
 		condition := deploymentutil.NewDeploymentCondition(apps.DeploymentProgressing, v1.ConditionUnknown, deploymentutil.ResumedDeployReason, "Deployment is resumed")
 		deploymentutil.SetDeploymentCondition(&d.Status, *condition)
 		needsUpdate = true
@@ -97,6 +108,7 @@ func (dc *DeploymentController) checkPausedConditions(d *apps.Deployment) error 
 	}
 
 	var err error
+	// 更新deployment对应的状态
 	d, err = dc.client.AppsV1().Deployments(d.Namespace).UpdateStatus(d)
 	return err
 }
@@ -150,7 +162,9 @@ func (dc *DeploymentController) getNewReplicaSet(d *apps.Deployment, rsList, old
 		rsCopy := existingNewRS.DeepCopy()
 
 		// Set existing new replica set's annotation
+		// 需要更新rs的Revision
 		annotationsUpdated := deploymentutil.SetNewReplicaSetAnnotations(d, rsCopy, newRevision, true, maxRevHistoryLengthInChars)
+		// 需要更新MinReadySeconds
 		minReadySecondsNeedsUpdate := rsCopy.Spec.MinReadySeconds != d.Spec.MinReadySeconds
 		if annotationsUpdated || minReadySecondsNeedsUpdate {
 			rsCopy.Spec.MinReadySeconds = d.Spec.MinReadySeconds
@@ -298,15 +312,22 @@ func (dc *DeploymentController) scale(deployment *apps.Deployment, newRS *apps.R
 	// If there is only one active replica set then we should scale that up to the full count of the
 	// deployment. If there is no active replica set, then we should scale up the newest replica set.
 	if activeOrLatest := deploymentutil.FindActiveOrLatest(newRS, oldRSs); activeOrLatest != nil {
+		// 存在activeOrLatest
 		if *(activeOrLatest.Spec.Replicas) == *(deployment.Spec.Replicas) {
+			// 已经达到预期的副本数
 			return nil
 		}
+
+		// 需要scale
 		_, _, err := dc.scaleReplicaSetAndRecordEvent(activeOrLatest, *(deployment.Spec.Replicas), deployment)
 		return err
 	}
 
+	// 如果 FindActiveOrLatest 发现有超过2给RS的replica大于0，则会走到这里
+
 	// If the new replica set is saturated, old replica sets should be fully scaled down.
 	// This case handles replica set adoption during a saturated new replica set.
+	// 如果newRS已经达到目标副本数，则将oldRS中副本数大于0的副本缩容为0
 	if deploymentutil.IsSaturated(deployment, newRS) {
 		for _, old := range controller.FilterActiveReplicaSets(oldRSs) {
 			if _, _, err := dc.scaleReplicaSetAndRecordEvent(old, 0, deployment); err != nil {
@@ -319,11 +340,15 @@ func (dc *DeploymentController) scale(deployment *apps.Deployment, newRS *apps.R
 	// There are old replica sets with pods and the new replica set is not saturated.
 	// We need to proportionally scale all replica sets (new and old) in case of a
 	// rolling deployment.
+	// 如果是滚动更新策略
 	if deploymentutil.IsRollingUpdate(deployment) {
+		// replicas大于0的replicas
 		allRSs := controller.FilterActiveReplicaSets(append(oldRSs, newRS))
+		// 所有副本集的副本数总和
 		allRSsReplicas := deploymentutil.GetReplicaCountForReplicaSets(allRSs)
 
 		allowedSize := int32(0)
+		// 最大允许的Pod数
 		if *(deployment.Spec.Replicas) > 0 {
 			allowedSize = *(deployment.Spec.Replicas) + deploymentutil.MaxSurge(*deployment)
 		}
@@ -331,6 +356,7 @@ func (dc *DeploymentController) scale(deployment *apps.Deployment, newRS *apps.R
 		// Number of additional replicas that can be either added or removed from the total
 		// replicas count. These replicas should be distributed proportionally to the active
 		// replica sets.
+		// 允许添加的副本数
 		deploymentReplicasToAdd := allowedSize - allRSsReplicas
 
 		// The additional replicas should be distributed proportionally amongst the active
@@ -341,10 +367,12 @@ func (dc *DeploymentController) scale(deployment *apps.Deployment, newRS *apps.R
 		var scalingOperation string
 		switch {
 		case deploymentReplicasToAdd > 0:
+			// 按照副本数降序排序，副本数相同则越晚创建的越前面
 			sort.Sort(controller.ReplicaSetsBySizeNewer(allRSs))
 			scalingOperation = "up"
 
 		case deploymentReplicasToAdd < 0:
+			// 按照副本数降序排序，副本数相同则越早创建越前面
 			sort.Sort(controller.ReplicaSetsBySizeOlder(allRSs))
 			scalingOperation = "down"
 		}
@@ -398,11 +426,13 @@ func (dc *DeploymentController) scaleReplicaSetAndRecordEvent(rs *apps.ReplicaSe
 		return false, rs, nil
 	}
 	var scalingOperation string
+	// 根据当前replicas与目标进行比对，是执行扩容还是缩容
 	if *(rs.Spec.Replicas) < newScale {
 		scalingOperation = "up"
 	} else {
 		scalingOperation = "down"
 	}
+	// 执行scale
 	scaled, newRS, err := dc.scaleReplicaSet(rs, newScale, deployment, scalingOperation)
 	return scaled, newRS, err
 }
@@ -418,6 +448,7 @@ func (dc *DeploymentController) scaleReplicaSet(rs *apps.ReplicaSet, newScale in
 	if sizeNeedsUpdate || annotationsNeedUpdate {
 		rsCopy := rs.DeepCopy()
 		*(rsCopy.Spec.Replicas) = newScale
+		// 设置annotation，触发scale
 		deploymentutil.SetReplicasAnnotations(rsCopy, *(deployment.Spec.Replicas), *(deployment.Spec.Replicas)+deploymentutil.MaxSurge(*deployment))
 		rs, err = dc.client.AppsV1().ReplicaSets(rsCopy.Namespace).Update(rsCopy)
 		if err == nil && sizeNeedsUpdate {

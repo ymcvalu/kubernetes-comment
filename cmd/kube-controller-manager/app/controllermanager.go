@@ -31,7 +31,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -53,7 +53,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/client-go/util/keyutil"
-	cloudprovider "k8s.io/cloud-provider"
+	"k8s.io/cloud-provider"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/version"
@@ -90,6 +90,7 @@ const (
 
 // NewControllerManagerCommand creates a *cobra.Command object with default parameters
 func NewControllerManagerCommand() *cobra.Command {
+	// kubeControllerManager的options
 	s, err := options.NewKubeControllerManagerOptions()
 	if err != nil {
 		klog.Fatalf("unable to initialize command options: %v", err)
@@ -108,13 +109,14 @@ controller, and serviceaccounts controller.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			verflag.PrintAndExitIfRequested()
 			utilflag.PrintFlags(cmd.Flags())
-
+			// 生成配置
 			c, err := s.Config(KnownControllers(), ControllersDisabledByDefault.List())
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
 			}
 
+			// Run
 			if err := Run(c.Complete(), wait.NeverStop); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
 				os.Exit(1)
@@ -122,7 +124,9 @@ controller, and serviceaccounts controller.`,
 		},
 	}
 
+	// 设置启动命令的flags参数
 	fs := cmd.Flags()
+	// 将配置项加入到flags中，允许通过flags来进行配置
 	namedFlagSets := s.Flags(KnownControllers(), ControllersDisabledByDefault.List())
 	verflag.AddFlags(namedFlagSets.FlagSet("global"))
 	globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name())
@@ -132,11 +136,15 @@ controller, and serviceaccounts controller.`,
 	}
 	usageFmt := "Usage:\n  %s\n"
 	cols, _, _ := term.TerminalSize(cmd.OutOrStdout())
+
+	// 设置usage
 	cmd.SetUsageFunc(func(cmd *cobra.Command) error {
 		fmt.Fprintf(cmd.OutOrStderr(), usageFmt, cmd.UseLine())
 		cliflag.PrintSections(cmd.OutOrStderr(), namedFlagSets, cols)
 		return nil
 	})
+
+	// 设置help
 	cmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(cmd.OutOrStdout(), "%s\n\n"+usageFmt, cmd.Long, cmd.UseLine())
 		cliflag.PrintSections(cmd.OutOrStdout(), namedFlagSets, cols)
@@ -167,8 +175,11 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 	}
 
 	// Setup any healthz checks we will want to use.
+	// 想要使用的 healthz Check
 	var checks []healthz.HealthChecker
+	//
 	var electionChecker *leaderelection.HealthzAdaptor
+	// 如果需要leader选举
 	if c.ComponentConfig.Generic.LeaderElection.LeaderElect {
 		electionChecker = leaderelection.NewLeaderHealthzAdaptor(time.Second * 20)
 		checks = append(checks, electionChecker)
@@ -225,16 +236,24 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		} else {
 			clientBuilder = rootClientBuilder
 		}
+
+		// creates a context struct containing references to resources needed by the controllers
+		// 各个 controller 共用informers
 		controllerContext, err := CreateControllerContext(c, rootClientBuilder, clientBuilder, ctx.Done())
 		if err != nil {
 			klog.Fatalf("error building controller context: %v", err)
 		}
+
+		// 用于启动 token controller
 		saTokenControllerInitFunc := serviceAccountTokenControllerStarter{rootClientBuilder: rootClientBuilder}.startServiceAccountTokenController
 
+		// 开始所有启用的controller
+		// NewControllerInitializers 返回各controller的启动函数
 		if err := StartControllers(controllerContext, saTokenControllerInitFunc, NewControllerInitializers(controllerContext.LoopMode), unsecuredMux); err != nil {
 			klog.Fatalf("error starting controllers: %v", err)
 		}
 
+		// 开始所有informer
 		controllerContext.InformerFactory.Start(controllerContext.Stop)
 		controllerContext.ObjectOrMetadataInformerFactory.Start(controllerContext.Stop)
 		close(controllerContext.InformersStarted)
@@ -242,6 +261,7 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		select {}
 	}
 
+	// 不需要leader选举
 	if !c.ComponentConfig.Generic.LeaderElection.LeaderElect {
 		run(context.TODO())
 		panic("unreachable")
@@ -255,6 +275,7 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 	// add a uniquifier so that two processes on the same host don't accidentally both become active
 	id = id + "_" + string(uuid.NewUUID())
 
+	// 创建分布式锁
 	rl, err := resourcelock.New(c.ComponentConfig.Generic.LeaderElection.ResourceLock,
 		c.ComponentConfig.Generic.LeaderElection.ResourceNamespace,
 		c.ComponentConfig.Generic.LeaderElection.ResourceName,
@@ -268,13 +289,14 @@ func Run(c *config.CompletedConfig, stopCh <-chan struct{}) error {
 		klog.Fatalf("error creating lock: %v", err)
 	}
 
+	// 开启leader选举
 	leaderelection.RunOrDie(context.TODO(), leaderelection.LeaderElectionConfig{
 		Lock:          rl,
 		LeaseDuration: c.ComponentConfig.Generic.LeaderElection.LeaseDuration.Duration,
 		RenewDeadline: c.ComponentConfig.Generic.LeaderElection.RenewDeadline.Duration,
 		RetryPeriod:   c.ComponentConfig.Generic.LeaderElection.RetryPeriod.Duration,
 		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: run,
+			OnStartedLeading: run, // 竞选leader成功
 			OnStoppedLeading: func() {
 				klog.Fatalf("leaderelection lost")
 			},
@@ -497,17 +519,21 @@ func CreateControllerContext(s *config.CompletedConfig, rootClientBuilder, clien
 func StartControllers(ctx ControllerContext, startSATokenController InitFunc, controllers map[string]InitFunc, unsecuredMux *mux.PathRecorderMux) error {
 	// Always start the SA token controller first using a full-power client, since it needs to mint tokens for the rest
 	// If this fails, just return here and fail since other controllers won't be able to get credentials.
+	// 首先开始token controller
 	if _, _, err := startSATokenController(ctx); err != nil {
 		return err
 	}
 
 	// Initialize the cloud provider with a reference to the clientBuilder only after token controller
 	// has started in case the cloud provider uses the client builder.
+	// 如果需要 cloud provider
 	if ctx.Cloud != nil {
 		ctx.Cloud.Initialize(ctx.ClientBuilder, ctx.Stop)
 	}
 
+	// 启动所有controller
 	for controllerName, initFn := range controllers {
+		// 如果 controller 没有启用，跳过
 		if !ctx.IsControllerEnabled(controllerName) {
 			klog.Warningf("%q is disabled", controllerName)
 			continue
@@ -516,6 +542,9 @@ func StartControllers(ctx ControllerContext, startSATokenController InitFunc, co
 		time.Sleep(wait.Jitter(ctx.ComponentConfig.Generic.ControllerStartInterval.Duration, ControllerStartJitter))
 
 		klog.V(1).Infof("Starting %q", controllerName)
+
+		// 启动对应的controller
+
 		debugHandler, started, err := initFn(ctx)
 		if err != nil {
 			klog.Errorf("Error starting %q", controllerName)

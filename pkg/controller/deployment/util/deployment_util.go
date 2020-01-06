@@ -27,7 +27,7 @@ import (
 	"k8s.io/klog"
 
 	apps "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -355,17 +355,23 @@ func FindActiveOrLatest(newRS *apps.ReplicaSet, oldRSs []*apps.ReplicaSet) *apps
 		return nil
 	}
 
+	// 按照创建时间对oldRS进行降序排序
 	sort.Sort(sort.Reverse(controller.ReplicaSetsByCreationTimestamp(oldRSs)))
+	// 获取所有spec#replicas大于0的rs
 	allRSs := controller.FilterActiveReplicaSets(append(oldRSs, newRS))
 
 	switch len(allRSs) {
 	case 0:
 		// If there is no active replica set then we should return the newest.
+		// 如果没有replicas>0的RS
 		if newRS != nil {
+			// newRS不为nil，则返回newRS
 			return newRS
 		}
+
 		return oldRSs[0]
 	case 1:
+		// 如果只有1个activeRS
 		return allRSs[0]
 	default:
 		return nil
@@ -641,8 +647,10 @@ func EqualIgnoreHash(template1, template2 *v1.PodTemplateSpec) bool {
 
 // FindNewReplicaSet returns the new RS this given deployment targets (the one with the same pod template).
 func FindNewReplicaSet(deployment *apps.Deployment, rsList []*apps.ReplicaSet) *apps.ReplicaSet {
+	// 按照创建时间进行升序排序
 	sort.Sort(controller.ReplicaSetsByCreationTimestamp(rsList))
 	for i := range rsList {
+		// 需要有相同的PodTemplate
 		if EqualIgnoreHash(&rsList[i].Spec.Template, &deployment.Spec.Template) {
 			// In rare cases, such as after cluster upgrades, Deployment may end up with
 			// having more than one new ReplicaSets that have the same template as its template,
@@ -660,9 +668,11 @@ func FindNewReplicaSet(deployment *apps.Deployment, rsList []*apps.ReplicaSet) *
 func FindOldReplicaSets(deployment *apps.Deployment, rsList []*apps.ReplicaSet) ([]*apps.ReplicaSet, []*apps.ReplicaSet) {
 	var requiredRSs []*apps.ReplicaSet
 	var allRSs []*apps.ReplicaSet
+	// 查找newRS
 	newRS := FindNewReplicaSet(deployment, rsList)
 	for _, rs := range rsList {
 		// Filter out new replica set
+		// 过滤newRS
 		if newRS != nil && rs.UID == newRS.UID {
 			continue
 		}
@@ -671,6 +681,8 @@ func FindOldReplicaSets(deployment *apps.Deployment, rsList []*apps.ReplicaSet) 
 			requiredRSs = append(requiredRSs, rs)
 		}
 	}
+	// requiredRSs只包含spec#replicas大于0的oldRS
+	// allRSs包含所有oldRS
 	return requiredRSs, allRSs
 }
 

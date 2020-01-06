@@ -22,7 +22,7 @@ import (
 	"sync"
 
 	apps "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -67,11 +67,14 @@ func (m *BaseControllerRefManager) CanAdopt() error {
 // No reconciliation will be attempted if the controller is being deleted.
 func (m *BaseControllerRefManager) ClaimObject(obj metav1.Object, match func(metav1.Object) bool, adopt, release func(metav1.Object) error) (bool, error) {
 	controllerRef := metav1.GetControllerOfNoCopy(obj)
+	// 存在controllerRef
 	if controllerRef != nil {
 		if controllerRef.UID != m.Controller.GetUID() {
 			// Owned by someone else. Ignore.
+			// 如果已经与其他deployment关联，跳过
 			return false, nil
 		}
+		// 检查是否匹配label
 		if match(obj) {
 			// We already own it and the selector matches.
 			// Return true (successfully claimed) before checking deletion timestamp.
@@ -81,9 +84,11 @@ func (m *BaseControllerRefManager) ClaimObject(obj metav1.Object, match func(met
 		}
 		// Owned by us but selector doesn't match.
 		// Try to release, unless we're being deleted.
+		// label不匹配，如果该deployment正在被删除，则跳过
 		if m.Controller.GetDeletionTimestamp() != nil {
 			return false, nil
 		}
+		// 释放该rs，取消关联
 		if err := release(obj); err != nil {
 			// If the pod no longer exists, ignore the error.
 			if errors.IsNotFound(err) {
@@ -97,8 +102,10 @@ func (m *BaseControllerRefManager) ClaimObject(obj metav1.Object, match func(met
 		return false, nil
 	}
 
+	// 走到这里说明该rs没有与任何deployment关联
 	// It's an orphan.
 	if m.Controller.GetDeletionTimestamp() != nil || !match(obj) {
+		// 如果该deployment正被删除或者rs的label不匹配
 		// Ignore if we're being deleted or selector doesn't match.
 		return false, nil
 	}
@@ -107,6 +114,7 @@ func (m *BaseControllerRefManager) ClaimObject(obj metav1.Object, match func(met
 		return false, nil
 	}
 	// Selector matches. Try to adopt.
+	// 该rs匹配label，设置rs的controllerRef，将其与deployment关联
 	if err := adopt(obj); err != nil {
 		// If the pod no longer exists, ignore the error.
 		if errors.IsNotFound(err) {
@@ -310,23 +318,29 @@ func (m *ReplicaSetControllerRefManager) ClaimReplicaSets(sets []*apps.ReplicaSe
 	var claimed []*apps.ReplicaSet
 	var errlist []error
 
+	// 测试label是否匹配
 	match := func(obj metav1.Object) bool {
 		return m.Selector.Matches(labels.Set(obj.GetLabels()))
 	}
+
+	// adopt对应的rs，就是更新rs的OwnerReference，将其与deployment关联
 	adopt := func(obj metav1.Object) error {
 		return m.AdoptReplicaSet(obj.(*apps.ReplicaSet))
 	}
+	// 当rs的label已经不再匹配，取消与deployment的关联
 	release := func(obj metav1.Object) error {
 		return m.ReleaseReplicaSet(obj.(*apps.ReplicaSet))
 	}
 
 	for _, rs := range sets {
+		// 遍历rs，进行检查
 		ok, err := m.ClaimObject(rs, match, adopt, release)
 		if err != nil {
 			errlist = append(errlist, err)
 			continue
 		}
 		if ok {
+			// 匹配的rs
 			claimed = append(claimed, rs)
 		}
 	}
@@ -336,11 +350,13 @@ func (m *ReplicaSetControllerRefManager) ClaimReplicaSets(sets []*apps.ReplicaSe
 // AdoptReplicaSet sends a patch to take control of the ReplicaSet. It returns
 // the error if the patching fails.
 func (m *ReplicaSetControllerRefManager) AdoptReplicaSet(rs *apps.ReplicaSet) error {
+	// 执行检查
 	if err := m.CanAdopt(); err != nil {
 		return fmt.Errorf("can't adopt ReplicaSet %v/%v (%v): %v", rs.Namespace, rs.Name, rs.UID, err)
 	}
 	// Note that ValidateOwnerReferences() will reject this patch if another
 	// OwnerReference exists with controller=true.
+	// 更新rs的controllerRef
 	patchBytes, err := ownerRefControllerPatch(m.Controller, m.controllerKind, rs.UID)
 	if err != nil {
 		return err

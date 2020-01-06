@@ -84,6 +84,7 @@ func startDeploymentController(ctx ControllerContext) (http.Handler, bool, error
 		return nil, false, nil
 	}
 	dc, err := deployment.NewDeploymentController(
+		// deployment需要关注Deployment、ReplicaSet和Pod的变化
 		ctx.InformerFactory.Apps().V1().Deployments(),
 		ctx.InformerFactory.Apps().V1().ReplicaSets(),
 		ctx.InformerFactory.Core().V1().Pods(),
@@ -92,6 +93,7 @@ func startDeploymentController(ctx ControllerContext) (http.Handler, bool, error
 	if err != nil {
 		return nil, true, fmt.Errorf("error creating Deployment controller: %v", err)
 	}
+	// 启动deployment-controller
 	go dc.Run(int(ctx.ComponentConfig.DeploymentController.ConcurrentDeploymentSyncs), ctx.Stop)
 	return nil, true, nil
 }

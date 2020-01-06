@@ -34,6 +34,7 @@ import (
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
+	// 创建command
 	command := app.NewControllerManagerCommand()
 
 	// TODO: once we switch everything over to Cobra commands, we can go back to calling
@@ -43,6 +44,7 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 
+	// exec command
 	if err := command.Execute(); err != nil {
 		os.Exit(1)
 	}
